@@ -71,6 +71,8 @@ type NetworkDB struct {
 	// waiting for an ack.
 	bulkSyncAckTbl map[string]chan struct{}
 
+	bulkSyncStats map[string]*BulkSyncStat
+
 	// Broadcast queue for network event gossip.
 	networkBroadcasts *memberlist.TransmitLimitedQueue
 
@@ -102,6 +104,47 @@ type NetworkDB struct {
 
 	// lastHealthTimestamp is the last timestamp when the health score got printed
 	lastHealthTimestamp time.Time
+}
+
+// tracking how many bulksync stats and locks for a given network
+type BulkSyncStat struct {
+
+	// the network id that this bulksync meta is for
+	networkid string
+
+	//
+	nodeStats map[string]*bulkSyncStatNode
+
+	// total numbre of bulksyncs items
+	syncCount int64
+	syncCountOld int64
+
+	// how many times have bulksyncs been triggered for this network
+	eventCount int64
+	eventCountOld int64
+
+
+	// when the first and last syncs ran
+	firstSyncTime time.Time
+	lastSyncTime time.Time
+
+	// current time the sync started
+	currStartSyncTime time.Time
+
+	// what is the current node sending the sync
+	activeSyncNode string
+
+	sync.RWMutex
+}
+
+type BulkSyncStatNode struct {
+	syncCountOld int64 // store the value before
+	eventCountOld int64 // store the value before
+	syncCount int64
+	eventCount int64
+	currStartSyncTime time.Time
+	firstSyncTime time.time
+	lastSyncTime time.time
 }
 
 // PeerInfo represents the peer (gossip cluster) nodes of a network
@@ -660,6 +703,8 @@ func (nDB *NetworkDB) LeaveNetwork(nid string) error {
 
 	// Update all the local entries marking them for deletion and delete all the remote entries
 	nDB.deleteNodeNetworkEntries(nid, nDB.config.NodeID)
+
+	//todo: need to delete the stats 
 
 	nodeNetworks, ok := nDB.networks[nDB.config.NodeID]
 	if !ok {

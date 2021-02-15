@@ -240,10 +240,131 @@ func (nDB *NetworkDB) handleCompound(buf []byte, isBulkSync bool) {
 		return
 	}
 
+	currentNetwork := nil
+	currNodeID := nil
+	hasBsLock := false
+
 	// Handle each message
 	for _, part := range parts {
+
+		if isBulkSync == true {
+			var tEvent TableEvent
+			if err := proto.Unmarshal(buf, &part); err != nil {
+				logrus.Errorf("Error decoding table event message: %v", err)
+				return
+			}
+
+			// check if we have switched networks
+			if currentNetwork != tEvent.NetworkID {
+				if curentNetwork != nil { // we are switching networks
+
+					// need to unlock the existing database send metrics to log and and cleanup values
+
+					// unlock the database
+					nDB.bulkSyncStats[currentNetwork].Unlock()
+					hasBsLock = false
+
+					ndb.bulkSyncMetaStatsAndLog(currentNetwork, currentNodeID)
+
+				}
+
+				// log that we are entering a set database
+				logrus.Infof("Bulksync Load Switching from network:%s to network:%s", curentNetwork, tEvent.NetworkID)
+
+				currentNodeID, currentNetwork = tEvent.NodeID, tEvent.NetworkID
+
+				// create the overall bulkSyncStats for this network
+				if _, bss_found := nDB.bulkSyncStats[currentNetwork]; bss_found == false {
+					nDB.bulkSyncStats[currentNetwork] := &BulkSyncStat{
+						networkid: currentNetwork,
+						syncCount: 1,
+						syncCountOld: 1,
+						eventCount: 0,
+						eventCountOld: 0,
+						firstSyncTime: time.Now(),
+						currStartSyncTime: time.Now(),
+						activeSyncNode: currentNodeID,
+					}
+				} else {
+					nDB.bulkSyncStats[currentNetwork]
+					nDB.bulkSyncStats[tEvent.NetworkID].syncCount++
+					nDB.bulkSyncStats[tEvent.NetworkID].eventCount++
+					nDB.bulkSyncStats[tEvent.NetworkID].activeSyncNode = currentNodeID
+					nDB.bulkSyncStats[tEvent.NetworkID].currStartSyncTime = time.Now()
+				}
+
+				// create the bulkSyncNodeStats
+				if _, bssb := nDB.bulkSyncStats[currentNetwork][currentNodeID]; bssn_found == false{
+					nDB.bulkSyncStats[currentNetwork][currentNodeID] := &BulkSyncStatNode{
+						syncCountOld: 0,
+						eventCountOld: 0,
+						syncCount: 1,
+						eventCount: 1,
+						firstSync: time.Now(),
+						currStartSyncTime: time.Now()
+					}
+				} else {
+					nDB.bulkSyncStats[tEvent.NetworkID][currentNodeID].syncCount++
+					nDB.bulkSyncStats[tEvent.NetworkID][currentNodeID].eventCount++
+					nDB.bulkSyncStats[tEvent.NetworkID][currentNodeID].currStartSyncTime = time.Now()
+				}
+
+				// start a timer to know how long we will wait for the lock
+				lockStartTime := time.Now()
+
+
+				// once we get the lock log how long we were waiting
+				logrus.Infof("Bulksync Load waiting for lock network:%s is locked by bulksync from:%s", curentNetwork, nDB.bulkSyncStats[currentNetwork].activeSyncNode)
+				nDB.bulkSyncStats[tEvent.NetworkID].Lock()
+				hasBsLock = true
+				logrus.Infof("Bulksync Load lockwait time network:%s waitTime:%d", curentNetwork, (time.Now().Sub(lockStartTime)))
+
+
+			} else {
+				// if we dont need to switch networks then continuing running events
+				nDB.bulkSyncStats[tEvent.NetworkID][tEvent.NodeID].eventCount++
+				nDB.bulkSyncStats[tEvent.NetworkID].eventCount++
+
+			}
+
+		} // if isBulkSync
+
+
 		nDB.handleMessage(part, isBulkSync)
+	} // for
+
+	// we will need to do some cleanup
+	if isBulkSync == true {
+
+		if hasBsLock == true { // check if we had a lock near the end
+			//remove the lock that we had
+			nDB.bulkSyncStats[currentNetwork].Unock()
+		}
+
+		// output and metrics
+		ndb.bulkSyncMetaStatsAndLog(currentNetwork, currentNodeID)
 	}
+}
+
+func (nDB *NetworkDB) bulkSyncMetaStatsAndLog(networkID string, nodeID string) {
+
+	// dump stats
+	logrus.Infof("Bulksync Load Metrics networkid=%s nodeid=%s node-syncCount=%d node-eventCount=%d network-syncCount=%d network-eventCount=%d syncTime=%f", curentNetwork, currentNodeID, nDB.bulkSyncStats[currentNetwork][currentNodeID].syncCount, nDB.bulkSyncStats[currentNetwork][currentNodeID].eventCount.Sub(nDB.bulkSyncStats[currentNetwork][currentNodeID].eventCountOld), nDB.bulkSyncStats[currentNetwork].syncCount, nDB.bulkSyncStats[currentNetwork].eventCount, time.Now().Sub(nDB.bulkSyncStats[currentNetwork][currentNodeID].startSyncTime))
+
+	// update stats for the network BS
+	nDB.bulkSyncStats[currentNetwork].activeSyncNode    = nil
+	nDB.bulkSyncStats[currentNetwork].lastSyncTime      = time.Now()
+	nDB.bulkSyncStats[currentNetwork].syncCountOld      = nDB.bulkSyncStats[currentNetwork].syncCount
+	nDB.bulkSyncStats[currentNetwork].eventCountOld     = nDB.bulkSyncStats[currentNetwork].eventCount
+	nDB.bulkSyncStats[currentNetwork].currStartSyncTime = nil
+
+	// update the stats for the node on the network BS
+	nDB.bulkSyncStats[currentNetwork][currentNodeID].lastSyncTime       = time.Now()
+	nDB.bulkSyncStats[currentNetwork][currentNodeID].currStartSyncTime  = nil
+	nDB.bulkSyncStats[currentNetwork][currentNodeID].syncCountOld       = nDB.bulkSyncStats[currentNetwork][currentNodeID].syncCount
+	nDB.bulkSyncStats[currentNetwork][currentNodeID].eventCountOld      = nDB.bulkSyncStats[currentNetwork][currentNodeID].eventCount
+
+	return
 }
 
 func (nDB *NetworkDB) handleTableMessage(buf []byte, isBulkSync bool) {
